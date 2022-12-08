@@ -1,18 +1,21 @@
 package com.plcoding.androidstorage
 
 import android.Manifest
+import android.app.RecoverableSecurityException
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.launch
 import androidx.core.content.ContextCompat
@@ -24,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.net.URI
 import java.util.*
 
 class MainActivity : AppCompatActivity() {
@@ -31,6 +35,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var internalStoragePhotoAdapter: InternalStoragePhotoAdapter
     private lateinit var externalStoragePhotoAdapter: SharedPhotoAdapter
     private lateinit var permissionsLauncher: ActivityResultLauncher<Array<String>>
+
+    // To request for permission to delete for API 29 and above
+    private lateinit var intentSenderLauncher: ActivityResultLauncher<IntentSenderRequest>
+    private var deletedPhotoUri: Uri? = null
     private lateinit var contentObserver: ContentObserver
 
     private var readExternalStoragePermissionGranted = false
@@ -108,6 +116,21 @@ class MainActivity : AppCompatActivity() {
         binding.btnTakePhoto.setOnClickListener {
             takePhoto.launch()
         }
+
+        intentSenderLauncher =
+            registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+                if (it.resultCode == RESULT_OK) {
+                    // SDK 29 to prevent STUPID action
+                    if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q) {
+                        lifecycleScope.launch {
+                            deleteFromExternalStorage(deletedPhotoUri ?: return@launch)
+                        }
+                    }
+                    Toast.makeText(this, "Photo deleted Successfully !!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Can't delete Photo !!", Toast.LENGTH_SHORT).show()
+                }
+            }
 
 
     }
@@ -187,8 +210,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupPublicStorageAdapter() {
         externalStoragePhotoAdapter = SharedPhotoAdapter {
-
-
+            lifecycleScope.launch {
+                deletedPhotoUri = it.contentUri
+                deleteFromExternalStorage(it.contentUri)
+            }
         }
 
     }
@@ -359,6 +384,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Delete differ from SDK version to another ...
+    // SDK 28 and below : delete without any permissions "normal"
+    // SDK 29 : you must accept permission first , then delete it again "STUPID"
+    // SDK 30 and above : accept permission and delete automatically "MORE_INTELLIGENCE"
+    private suspend fun deleteFromExternalStorage(photoUri: Uri) {
+        withContext(Dispatchers.IO) {
+            try {
+                // SDK 28 , no permissions
+                contentResolver.delete(photoUri, null, null)
+            } catch (e: SecurityException) {
+                val intentSender = when {
+                    // SDK 30 and above
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
+                        MediaStore.createDeleteRequest(
+                            contentResolver,
+                            listOf(photoUri)
+                        ).intentSender
+                    }
+                    // SDK 29
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
+                        val recoverableSecurityException = e as? RecoverableSecurityException
+                        recoverableSecurityException?.userAction?.actionIntent?.intentSender
+                    }
+                    else -> null
+                }
+
+                intentSender?.let { sender ->
+                    intentSenderLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                }
+            }
+        }
+    }
 
     // TODO : Observers
     private fun initContentObserver() {
